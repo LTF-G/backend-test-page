@@ -17,13 +17,12 @@ class CustomSigner {
  * @param {function(string)} onStatsReport - callback function to inform current stat of webrtc connection
  * @return {function():void} close function that sends connection termination signal to another peer
  */
-async function startMaster(kinesisInfo, localView, onStatsReport) {
-    this.localView = localView;
+async function startMaster(kinesisInfo, onStatsReport) {
+    // this.localView = localView;
 
     const role = "MASTER";
     this.clientId = null;
     this.role = role;
-    this.peerConnectionByClientId = {};
 
     const configuration = kinesisInfo.configuration;
 
@@ -35,21 +34,6 @@ async function startMaster(kinesisInfo, localView, onStatsReport) {
         channelEndpoint: "default",
     });
 
-    this.peerConnection = new RTCPeerConnection(configuration);
-
-    // Get a stream from the webcam and display it in the local view.
-    // If no video/audio needed, no need to request for the sources.
-    // Otherwise, the browser will throw an error saying that either video or audio has to be enabled.
-    try {
-        this.localStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
-        });
-        localView.srcObject = this.localStream;
-    } catch (e) {
-        console.error("[MASTER] Could not find webcam");
-    }
-
     this.signalingClient.on("open", async () => {
         console.log("[MASTER] Connected to signaling service");
     });
@@ -57,17 +41,25 @@ async function startMaster(kinesisInfo, localView, onStatsReport) {
     this.signalingClient.on("sdpOffer", async (offer, remoteClientId) => {
         console.log("[MASTER] Received SDP offer from client: " + remoteClientId);
 
-        // Create a new peer connection using the offer from the given client
-        const peerConnection = new RTCPeerConnection(configuration);
-        this.peerConnectionByClientId[remoteClientId] = peerConnection;
+        this.peerConnection = new RTCPeerConnection(configuration);
+
+        this.dataChannel = this.peerConnection.createDataChannel("kvsDataChannel");
+        this.peerConnection.ondatachannel = (e) => {
+            e.channel.onmessage = (msg) => {
+                console.log(msg);
+            };
+        };
 
         // Poll for connection stats
         if (!this.peerConnectionStatsInterval) {
-            this.peerConnectionStatsInterval = setInterval(() => peerConnection.getStats().then(onStatsReport), 1000);
+            this.peerConnectionStatsInterval = setInterval(
+                () => this.peerConnection.getStats().then(onStatsReport),
+                1000
+            );
         }
 
         // Send any ICE candidates to the other peer
-        peerConnection.addEventListener("icecandidate", ({ candidate }) => {
+        this.peerConnection.addEventListener("icecandidate", ({ candidate }) => {
             if (candidate) {
                 console.log("[MASTER] Generated ICE candidate for client: " + remoteClientId);
 
@@ -76,40 +68,34 @@ async function startMaster(kinesisInfo, localView, onStatsReport) {
                 this.signalingClient.sendIceCandidate(candidate, remoteClientId);
             } else {
                 console.log("[MASTER] All ICE candidates have been generated for client: " + remoteClientId);
-
-                // When trickle ICE is disabled, send the answer now that all the ICE candidates have ben generated.
-                console.log("[MASTER] Sending SDP answer to client: " + remoteClientId);
-                this.signalingClient.sendSdpAnswer(peerConnection.localDescription, remoteClientId);
+                // console.log("[MASTER] Sending SDP answer to client: " + remoteClientId);
+                // this.signalingClient.sendSdpAnswer(this.peerConnection.localDescription, remoteClientId);
             }
         });
 
         // As remote tracks are received, add them to the remote view
-        // peerConnection.addEventListener("track", (event) => {
-        //     console.log("[MASTER] Received remote track from client: " + remoteClientId);
-        //     if (remoteView.srcObject) {
-        //         return;
-        //     }
-        //     remoteView.srcObject = event.streams[0];
-        // });
+        this.peerConnection.addEventListener("track", (event) => {
+            console.log("[MASTER] Received remote track from client: " + remoteClientId);
+        });
 
         // If there's no video/audio, this.localStream will be null. So, we should skip adding the tracks from it.
-        if (this.localStream) {
-            this.localStream.getTracks().forEach((track) => peerConnection.addTrack(track, this.localStream));
-        }
-        await peerConnection.setRemoteDescription(offer);
+        // if (this.localStream) {
+        //     this.localStream.getTracks().forEach((track) => peerConnection.addTrack(track, this.localStream));
+        // }
+        await this.peerConnection.setRemoteDescription(offer);
 
         // Create an SDP answer to send back to the client
         console.log("[MASTER] Creating SDP answer for client: " + remoteClientId);
-        await peerConnection.setLocalDescription(
-            await peerConnection.createAnswer({
-                offerToReceiveAudio: false,
-                offerToReceiveVideo: false,
+        await this.peerConnection.setLocalDescription(
+            await this.peerConnection.createAnswer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true,
             })
         );
 
         // When trickle ICE is enabled, send the answer now and then send ICE candidates as they are generated. Otherwise wait on the ICE candidates.
         console.log("[MASTER] Sending SDP answer to client: " + remoteClientId);
-        this.signalingClient.sendSdpAnswer(peerConnection.localDescription, remoteClientId);
+        this.signalingClient.sendSdpAnswer(this.peerConnection.localDescription, remoteClientId);
         console.log("[MASTER] Generating ICE candidates for client: " + remoteClientId);
     });
 
@@ -117,23 +103,29 @@ async function startMaster(kinesisInfo, localView, onStatsReport) {
         console.log("[MASTER] Received ICE candidate from client: " + remoteClientId);
 
         // Add the ICE candidate received from the client to the peer connection
-        const peerConnection = this.peerConnectionByClientId[remoteClientId];
-        peerConnection.addIceCandidate(candidate);
+        this.peerConnection.addIceCandidate(candidate);
     });
 
     this.signalingClient.on("close", () => {
         console.log("[MASTER] Disconnected from signaling channel");
     });
 
-    this.signalingClient.on("error", () => {
+    this.signalingClient.on("error", (e) => {
         console.error("[MASTER] Signaling client error");
+        console.error(e);
     });
 
     console.log("[MASTER] Starting master connection");
     this.signalingClient.open();
 
     // close function that sends connection termination signal to another peer
-    return () => {};
+    return {
+        close: () => {},
+        send: (message) => {
+            console.log(this.dataChannel);
+            this.dataChannel.send(message);
+        },
+    };
 }
 
 module.exports = startMaster;

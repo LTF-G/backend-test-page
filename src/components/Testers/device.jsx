@@ -1,26 +1,26 @@
-import { getCookie } from "../../lib/cookie";
+// import { getCookie } from "../../lib/cookie";
+import startViewer from "../../lib/kinesis/viewer";
 const { useRef } = require("react");
 
 function Device() {
     const dataToSend = useRef();
+    const sendData = useRef();
 
     const checkChannel = async () => {
-        const authorization = "Bearer " + getCookie("access");
-        const refresh = "Bearer " + getCookie("refresh");
-
         const response = await fetch(process.env.REACT_APP_PROXY_HOST + "/channel/device", {
             method: "GET",
             headers: {
                 "Content-Type": "application/json",
-                authorization,
-                refresh,
             },
             body: null,
-        }).then((res) => res.json());
+        })
+            .then((res) => res.json())
+            .then(async (data) => {
+                console.log(data.channelData);
+                if (data.channelData) sendData.current = (await startViewer(data.channelData, () => {})).send;
+            });
         console.log(response);
     };
-
-    const sendData = async () => {};
 
     return (
         <div className="controllerPlane">
@@ -32,7 +32,7 @@ function Device() {
             <button
                 type="button"
                 onClick={() => {
-                    window.location.href = "/mobile";
+                    sendData.current(dataToSend.current.value);
                 }}
             >
                 sendData
